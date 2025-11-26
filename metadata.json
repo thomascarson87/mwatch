@@ -1,0 +1,8 @@
+{
+  "name": "mwatch",
+  "description": "A real-time sports watch party platform with video chat and AI-powered commentary.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
