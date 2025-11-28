@@ -1,40 +1,73 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { VideoPlayer } from './VideoPlayer';
 import { ChatSidebar } from './ChatSidebar';
 import { UserMedia } from './UserMedia';
-import { Message, User, StreamConfig, RoomState } from './types';
-import { Mic, MicOff, Video, VideoOff, PhoneOff, Share2, Code, MessageSquare, X, Trophy, Play, Loader2 } from 'lucide-react';
-import { generateHypeCommentary } from './geminiService';
-// @ts-ignore - Trystero is imported via importmap
+import { Message, User, StreamConfig, RoomState, Channel } from './types';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Share2, MessageSquare, X, Trophy, Play, Tv, ChevronUp, ChevronDown, Plus, Trash2 } from 'lucide-react';
 import { joinRoom, selfId } from 'trystero';
 
 const App: React.FC = () => {
   const [roomState, setRoomState] = useState<RoomState>(RoomState.LOBBY);
-  // Default user is just "Me"
   const [users, setUsers] = useState<User[]>([
     { id: 'local', name: 'Fan_1', isLocal: true, isMuted: false, isVideoOff: false }
   ]);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [streamConfig, setStreamConfig] = useState<StreamConfig>({ url: '', type: 'direct' });
-  const [streamInput, setStreamInput] = useState('https://embednow.top/embed/cricket/2025/in-za/2nd-test');
+  
+  // Default stream for initial load
+  const DEFAULT_STREAM = `<iframe id="player" marginheight="0" marginwidth="0" src="https://embednow.top/embed/ucl/2025-11-25/che-bar" scrolling="no" allowfullscreen="yes" allow="encrypted-media; picture-in-picture;" width="100%" height="100%" frameborder="0" style="position:absolute;"></iframe>`;
+  
+  // Multi-Channel State
+  const [channels, setChannels] = useState<Channel[]>([
+    { id: 'default', name: 'Channel 1', url: DEFAULT_STREAM }
+  ]);
+  const [activeChannelId, setActiveChannelId] = useState<string>('default');
+  const [newChannelInput, setNewChannelInput] = useState('');
+
+  // Derived Stream Config for Player
+  const activeChannel = useMemo(() => 
+    channels.find(c => c.id === activeChannelId) || channels[0], 
+  [channels, activeChannelId]);
+
+  const streamConfig: StreamConfig = { url: activeChannel.url, type: 'direct' };
+
   const [localStream, setLocalStream] = useState<MediaStream | undefined>(undefined);
   
   // P2P State
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
-  const [room, setRoom] = useState<any>(null);
+  
+  // Room refs and state
+  const roomRef = useRef<any>(null);
+  const [roomReady, setRoomReady] = useState(false);
 
   const [showInvite, setShowInvite] = useState(false);
   const [userName, setUserName] = useState('Fan_1');
   
   // UI States
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isStreamMenuOpen, setIsStreamMenuOpen] = useState(false);
+  
+  // Avatar View Modes
+  const [areAvatarsHidden, setAreAvatarsHidden] = useState(false);
+  const [areAvatarsTiny, setAreAvatarsTiny] = useState(false);
+
   const [unreadCount, setUnreadCount] = useState(0);
   const [notification, setNotification] = useState<{sender: string, text: string} | null>(null);
 
-  // Initialize camera access
+  // Initialize camera access with HIGH QUALITY constraints
   const initMedia = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+            width: { ideal: 640 }, 
+            height: { ideal: 480 },
+            frameRate: { ideal: 30 }
+        }, 
+        audio: { 
+            echoCancellation: true, 
+            noiseSuppression: true,
+            autoGainControl: true
+        } 
+      });
       setLocalStream(stream);
       return stream;
     } catch (err) {
@@ -43,40 +76,36 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Check for stream in URL on mount
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const sharedStream = params.get('stream');
-    if (sharedStream) {
-      setStreamInput(sharedStream);
-    }
-  }, []);
-
   // --- P2P ROOM LOGIC ---
   useEffect(() => {
-    if (roomState === RoomState.ACTIVE && localStream) {
-      // 1. Generate a consistent Room ID from the Stream URL
-      // We strip special chars to make it URL safe-ish for the room ID
-      const sanitizedId = btoa(streamInput).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
-      const roomId = `mwatch-v1-${sanitizedId}`;
-      
-      console.log(`Joining Room: ${roomId} as ${selfId}`);
+    if (roomState === RoomState.ACTIVE) {
+      if (roomRef.current) return;
 
-      // 2. Connect to Trystero Room
-      const r = joinRoom({ appId: 'mwatch-live-app' }, roomId);
+      const roomId = 'mwatch-global-party-v1';
+      console.log(`Joining Global Room: ${roomId} as ${selfId}`);
+
+      // PRODUCTION CONFIG: Using public STUN servers to ensure connectivity across NATs/Firewalls
+      const r = joinRoom({ 
+          appId: 'mwatch-live-app',
+          rtcConfig: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:global.stun.twilio.com:3478' }
+            ]
+          }
+      }, roomId);
       
-      // 3. Define Actions
       const [sendUserUpdate, getUserUpdate] = r.makeAction('userUpdate');
       const [sendChat, getChat] = r.makeAction('chat');
+      const [sendChannelState, getChannelState] = r.makeAction('channelState');
 
-      // 4. Handle Incoming User Data
+      // 1. Handle User Updates
       getUserUpdate((data: Partial<User>, peerId: string) => {
         setUsers(prev => {
            const existing = prev.find(u => u.peerId === peerId);
            if (existing) {
              return prev.map(u => u.peerId === peerId ? { ...u, ...data } : u);
            } else {
-             // New user found via data channel (before stream maybe)
              return [...prev, { 
                 id: peerId, 
                 peerId: peerId,
@@ -89,50 +118,64 @@ const App: React.FC = () => {
         });
       });
 
-      // 5. Handle Incoming Chat
+      // 2. Handle Chat
       getChat((data: any, peerId: string) => {
          const sender = users.find(u => u.peerId === peerId)?.name || 'Unknown';
          const msg: Message = {
             id: Date.now().toString() + peerId,
             sender: data.sender || sender,
             text: data.text,
-            timestamp: new Date(),
-            isAi: false
+            timestamp: new Date()
          };
          addMessage(msg);
       });
 
-      // 6. Handle P2P Streams
+      // 3. Handle Channel Sync
+      getChannelState((data: { channels: Channel[], activeId: string }, peerId: string) => {
+         setChannels(data.channels);
+         setActiveChannelId(prev => {
+             if (prev !== data.activeId) {
+                 const newChan = data.channels.find(c => c.id === data.activeId);
+                 addSystemMessage(`Channel switched to ${newChan?.name || 'Channel'}`);
+                 return data.activeId;
+             }
+             return prev;
+         });
+      });
+
+      // 4. Peer Events
       r.onPeerJoin((peerId: string) => {
-         console.log('Peer joined:', peerId);
-         // Broadcast my info to the new peer
+         if (localStream) {
+             r.addStream(localStream, peerId);
+         }
+         // Send my info
          sendUserUpdate({ 
              name: userName, 
              isMuted: users[0].isMuted, 
              isVideoOff: users[0].isVideoOff 
          }, peerId);
          
-         addSystemMessage(`A fan joined the room!`);
+         // Sync current channel state
+         sendChannelState({ channels, activeId: activeChannelId }, peerId);
+         
+         addSystemMessage(`A fan joined the squad!`);
       });
 
       r.onPeerLeave((peerId: string) => {
-         console.log('Peer left:', peerId);
          setUsers(prev => prev.filter(u => u.peerId !== peerId));
          setRemoteStreams(prev => {
              const next = { ...prev };
              delete next[peerId];
              return next;
          });
-         addSystemMessage(`A fan left the room.`);
       });
 
       r.onPeerStream((stream: MediaStream, peerId: string) => {
-         console.log('Received stream from:', peerId);
          setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
-         
-         // Ensure user exists in list
          setUsers(prev => {
-             if (prev.find(u => u.peerId === peerId)) return prev;
+             const exists = prev.find(u => u.peerId === peerId);
+             if (exists) return prev;
+             
              return [...prev, { 
                  id: peerId, 
                  peerId: peerId,
@@ -144,36 +187,44 @@ const App: React.FC = () => {
          });
       });
 
-      // 7. Add my stream
-      r.addStream(localStream);
-
-      // Store room ref
-      setRoom({ r, sendUserUpdate, sendChat });
+      roomRef.current = { r, sendUserUpdate, sendChat, sendChannelState };
+      setRoomReady(true);
       
-      // Cleanup
       return () => {
         r.leave();
+        roomRef.current = null;
+        setRoomReady(false);
       };
     }
-  }, [roomState, localStream]);
+  }, [roomState]); 
 
-  // Handle local state changes (Mute/Video) and broadcast
+  // Add local stream to room once connected
   useEffect(() => {
-     if (room && users[0]) {
-         // Broadcast my current state to everyone
-         room.sendUserUpdate({
+    if (roomReady && roomRef.current && localStream) {
+        roomRef.current.r.addStream(localStream);
+    }
+  }, [roomReady, localStream]);
+
+  // Handle local state changes for user info
+  useEffect(() => {
+     if (roomRef.current && users[0]) {
+         roomRef.current.sendUserUpdate({
              name: userName,
              isMuted: users[0].isMuted,
              isVideoOff: users[0].isVideoOff
          });
      }
-  }, [users[0].isMuted, users[0].isVideoOff, userName, room]);
+  }, [users[0].isMuted, users[0].isVideoOff, userName, roomReady]);
 
+  // Sync channels when state updates locally
+  const broadcastChannelState = (newChannels: Channel[], newActiveId: string) => {
+      if (roomRef.current) {
+          roomRef.current.sendChannelState({ channels: newChannels, activeId: newActiveId });
+      }
+  };
 
   const addMessage = (msg: Message) => {
     setMessages(prev => [...prev, msg]);
-    
-    // Notification logic
     if (msg.sender !== userName) {
        if (!isChatOpen) {
           setUnreadCount(prev => prev + 1);
@@ -188,71 +239,83 @@ const App: React.FC = () => {
       id: Date.now().toString(),
       sender: 'System',
       text,
-      timestamp: new Date(),
-      isAi: false
+      timestamp: new Date()
     });
   };
 
-  const handleSendMessage = (text: string, isAiQuery = false) => {
-    // 1. Add locally
+  const handleSendMessage = (text: string) => {
     const newMessage: Message = {
       id: Date.now().toString(),
-      sender: isAiQuery ? 'mwatch AI' : userName,
+      sender: userName,
       text: text,
-      timestamp: new Date(),
-      isAi: isAiQuery
+      timestamp: new Date()
     };
-    
     addMessage(newMessage);
 
-    // 2. Broadcast if not AI query
-    if (!isAiQuery && room) {
-        room.sendChat({ text, sender: userName });
+    if (roomRef.current) {
+        roomRef.current.sendChat({ text, sender: userName });
     }
+  };
 
-    // 3. AI Logic
-    if (isAiQuery) {
-       // Only I see my AI interaction
-    }
+  // --- CHANNEL MANAGEMENT ---
+
+  const handleSwitchChannel = (channelId: string) => {
+      setActiveChannelId(channelId);
+      broadcastChannelState(channels, channelId);
+      setIsStreamMenuOpen(false); // Close menu on select
+  };
+
+  const handleAddChannel = () => {
+      if (!newChannelInput.trim()) return;
+
+      const newId = Date.now().toString();
+      const newChannel: Channel = {
+          id: newId,
+          name: `Channel ${channels.length + 1}`,
+          url: newChannelInput
+      };
+      
+      const updatedChannels = [...channels, newChannel];
+      setChannels(updatedChannels);
+      setNewChannelInput('');
+      
+      broadcastChannelState(updatedChannels, activeChannelId);
+  };
+
+  const handleDeleteChannel = (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      if (channels.length <= 1) return; // Don't delete last channel
+      
+      const updatedChannels = channels.filter(c => c.id !== id);
+      setChannels(updatedChannels);
+      
+      let nextActiveId = activeChannelId;
+      if (activeChannelId === id) {
+          nextActiveId = updatedChannels[0].id;
+          setActiveChannelId(nextActiveId);
+      }
+
+      broadcastChannelState(updatedChannels, nextActiveId);
   };
 
   const toggleMute = () => {
     if (localStream) {
       localStream.getAudioTracks().forEach(track => track.enabled = !track.enabled);
-      setUsers(prev => prev.map(u => u.isLocal ? { ...u, isMuted: !u.isMuted } : u));
     }
+    setUsers(prev => prev.map(u => u.isLocal ? { ...u, isMuted: !u.isMuted } : u));
   };
 
   const toggleVideo = () => {
     if (localStream) {
       localStream.getVideoTracks().forEach(track => track.enabled = !track.enabled);
-      setUsers(prev => prev.map(u => u.isLocal ? { ...u, isVideoOff: !u.isVideoOff } : u));
     }
+    setUsers(prev => prev.map(u => u.isLocal ? { ...u, isVideoOff: !u.isVideoOff } : u));
   };
   
   const handleJoin = async () => {
-      // Init media first
       await initMedia();
       setUsers(prev => prev.map(u => u.isLocal ? { ...u, name: userName } : u));
-      setStreamConfig({ url: streamInput, type: 'youtube' });
       setRoomState(RoomState.ACTIVE);
-
-      // Update URL so invite link works correctly for this specific stream
-      const url = new URL(window.location.href);
-      url.searchParams.set('stream', streamInput);
-      window.history.pushState({}, '', url);
-
-      // Initial Hype
-      setTimeout(async () => {
-         const hype = await generateHypeCommentary("Live Sports Match");
-         addMessage({
-            id: Date.now().toString(),
-            sender: "mwatch AI",
-            text: hype,
-            timestamp: new Date(),
-            isAi: true
-         });
-      }, 1500);
   };
 
   const handleInvite = async () => {
@@ -269,13 +332,22 @@ const App: React.FC = () => {
             console.log('Error sharing:', err);
         }
     } else {
-        navigator.clipboard.writeText(window.location.href);
-        setShowInvite(true);
-        setTimeout(() => setShowInvite(false), 2000);
+        try {
+            await navigator.clipboard.writeText(window.location.href);
+            setShowInvite(true);
+            setTimeout(() => setShowInvite(false), 2000);
+        } catch (err) {
+            const input = document.createElement('input');
+            input.value = window.location.href;
+            document.body.appendChild(input);
+            input.select();
+            document.execCommand('copy');
+            document.body.removeChild(input);
+            setShowInvite(true);
+            setTimeout(() => setShowInvite(false), 2000);
+        }
     }
   };
-
-  // --- RENDER ---
 
   if (roomState === RoomState.LOBBY) {
     return (
@@ -292,7 +364,7 @@ const App: React.FC = () => {
             </div>
           </div>
           <h1 className="text-4xl font-bold text-center mb-2 bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">mwatch</h1>
-          <p className="text-center text-gray-400 mb-8">Watch sports together, wherever you are.</p>
+          <p className="text-center text-gray-400 mb-8">Global Watch Party - Join the Crowd</p>
 
           <div className="space-y-4">
              <div>
@@ -302,32 +374,16 @@ const App: React.FC = () => {
                     value={userName}
                     onChange={(e) => setUserName(e.target.value)}
                     className="w-full bg-stadium-900 border border-stadium-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-stadium-accent focus:outline-none"
+                    placeholder="Enter your nickname"
                 />
              </div>
-
-             <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Stream Link or Embed Code</label>
-                <div className="relative">
-                    <Code className="absolute left-3 top-3.5 text-gray-500" size={16} />
-                    <input 
-                        type="text" 
-                        value={streamInput}
-                        onChange={(e) => setStreamInput(e.target.value)}
-                        placeholder="Paste URL or <iframe src='...'></iframe>"
-                        className="w-full bg-stadium-900 border border-stadium-700 rounded-lg pl-10 pr-3 py-3 text-white focus:ring-2 focus:ring-stadium-accent focus:outline-none"
-                    />
-                </div>
-                <p className="text-xs text-gray-500 mt-2">
-                   Tip: Paste the embed code here, then click Join. The Invite button will then share this specific match.
-                </p>
-             </div>
-
+             
              <button 
                 onClick={handleJoin}
                 className="w-full bg-stadium-accent hover:bg-blue-600 text-white font-bold py-4 rounded-lg transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2 mt-6"
              >
                 <Play size={20} fill="currentColor" />
-                Join Room
+                Join Party
              </button>
           </div>
         </div>
@@ -338,150 +394,197 @@ const App: React.FC = () => {
   return (
     <div className="h-screen w-screen bg-black overflow-hidden relative font-sans">
       
-      {/* BACKGROUND LAYER: Video Player */}
+      {/* BACKGROUND: Video Player */}
       <div className="absolute inset-0 z-0">
           <VideoPlayer streamConfig={streamConfig} />
       </div>
 
-      {/* GRADIENT OVERLAY TOP: For Header Visibility */}
-      <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none z-10" />
-      
-      {/* LAYER 2: Floating Header */}
-      <div className="absolute top-0 left-0 w-full z-20 flex items-start justify-between p-6 pointer-events-none">
-           <div className="flex flex-col gap-2 pointer-events-auto">
-               <div className="flex items-center gap-2">
-                    <Trophy className="text-stadium-accent drop-shadow-lg" size={24} />
-                    <span className="font-bold text-lg text-white drop-shadow-md hidden sm:block">mwatch</span>
-                    <span className="bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded animate-pulse ml-2 shadow-lg">LIVE</span>
-               </div>
-               
-               {/* Minimal Input to change stream */}
-               <div className="group relative w-64 transition-all opacity-50 hover:opacity-100">
-                   <input 
-                      type="text" 
-                      value={streamInput}
-                      onChange={(e) => {
-                          setStreamInput(e.target.value);
-                          setStreamConfig({ ...streamConfig, url: e.target.value });
-                          
-                          // Update URL if user changes stream mid-game
-                          const url = new URL(window.location.href);
-                          url.searchParams.set('stream', e.target.value);
-                          window.history.pushState({}, '', url);
-                      }}
-                      className="w-full bg-black/40 border border-white/10 rounded-full px-4 py-1.5 text-xs text-white backdrop-blur-sm focus:bg-black/80 transition-all outline-none"
-                      placeholder="Paste new link..."
-                   />
-               </div>
-           </div>
+      {/* TOP GRADIENT */}
+      <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-black/80 via-black/40 to-transparent pointer-events-none z-10" />
 
-           <div className="pointer-events-auto">
-               <button 
-                  onClick={handleInvite}
-                  className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-md text-sm px-4 py-2 rounded-full transition-all border border-white/10 text-white shadow-lg"
-               >
-                  <Share2 size={16} />
-                  <span className="hidden sm:inline">{showInvite ? 'Copied!' : 'Invite'}</span>
-               </button>
-           </div>
+      {/* --- CORNER 1: TOP LEFT (Brand & Channel Indicator) --- */}
+      <div className="absolute top-4 left-4 z-50 flex flex-col items-start gap-1 select-none pointer-events-auto">
+          <div className="flex items-center gap-2">
+            <Trophy className="text-stadium-accent drop-shadow-lg" size={24} />
+            <span className="font-bold text-lg text-white drop-shadow-md hidden sm:block">mwatch</span>
+            <span className="bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded animate-pulse shadow-lg">LIVE</span>
+          </div>
+          <div className="bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-gray-300 border border-white/10">
+              {activeChannel.name}
+          </div>
       </div>
 
-      {/* LAYER 3: Ambient User Bubbles (Bottom Center) */}
-      <div className="absolute bottom-24 left-0 right-0 z-20 flex justify-center items-end gap-4 px-4 pointer-events-none">
-          {users.map((user, index) => (
-              <div 
-                key={user.id} 
-                className="pointer-events-auto transition-all duration-500 hover:scale-110 hover:-translate-y-2 animate-in fade-in zoom-in slide-in-from-bottom-4 duration-500"
-                style={{
-                    zIndex: 20 + index
-                }}
-              >
+      {/* --- TOP CENTER: AVATAR STRIP --- */}
+      <div className={`absolute top-4 left-0 w-full flex justify-center z-40 transition-all duration-300 pointer-events-none ${areAvatarsHidden ? '-translate-y-32 opacity-0' : 'translate-y-0 opacity-100'}`}>
+          <div className={`flex items-center transition-all duration-300 pointer-events-auto ${areAvatarsTiny ? 'bg-black/40 p-1.5 gap-2' : 'p-2 gap-4'} rounded-full backdrop-blur-sm`}>
+            {users.map((user) => {
+                const stream = user.isLocal ? localStream : (user.peerId ? remoteStreams[user.peerId] : undefined);
+                return (
                   <UserMedia 
+                      key={user.id}
                       user={user} 
-                      stream={user.isLocal ? localStream : (user.peerId ? remoteStreams[user.peerId] : undefined)}
-                      className="w-20 h-20 sm:w-28 sm:h-28 shadow-2xl border-2 border-white/20"
+                      stream={stream}
+                      isTiny={areAvatarsTiny}
+                      onClick={() => setAreAvatarsTiny(!areAvatarsTiny)}
+                      className="shadow-lg border border-white/20"
                   />
-                  {/* Connection indicator for remote users without streams yet */}
-                  {!user.isLocal && !remoteStreams[user.peerId!] && (
-                      <div className="absolute inset-0 flex items-center justify-center">
-                          <Loader2 className="animate-spin text-stadium-accent" size={24} />
-                      </div>
-                  )}
-              </div>
-          ))}
+                );
+            })}
+          </div>
       </div>
 
-      {/* LAYER 4: Floating Controls (Bottom Center) */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-4 bg-black/50 backdrop-blur-lg px-6 py-3 rounded-full border border-white/10 shadow-2xl">
-           <button 
-              onClick={toggleMute}
-              className={`p-3 rounded-full transition-all ${users[0].isMuted ? 'bg-red-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
-           >
-              {users[0].isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-           </button>
-           
-           <button 
-              onClick={() => {
-                  if (room && room.r) room.r.leave();
-                  window.location.reload(); // Simple reload to leave cleanly
-              }}
-              className="p-3 rounded-full bg-red-600 hover:bg-red-700 text-white px-6 flex items-center gap-2"
-           >
-              <PhoneOff size={20} />
-              <span className="text-sm font-bold hidden sm:inline">Leave</span>
-           </button>
+      {/* --- CORNER 2: TOP RIGHT (Invite & Avatar Toggle) --- */}
+      <div className="absolute top-4 right-4 z-50 flex gap-2 pointer-events-none">
+         <button 
+             onClick={() => setAreAvatarsHidden(!areAvatarsHidden)}
+             className="bg-black/40 hover:bg-black/60 backdrop-blur-md text-white p-2 rounded-full border border-white/10 shadow-lg transition-colors pointer-events-auto"
+             title={areAvatarsHidden ? "Show Squad" : "Hide Squad"}
+         >
+             {areAvatarsHidden ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
+         </button>
 
-           <button 
-              onClick={toggleVideo}
-              className={`p-3 rounded-full transition-all ${users[0].isVideoOff ? 'bg-red-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
-           >
-              {users[0].isVideoOff ? <VideoOff size={20} /> : <Video size={20} />}
-           </button>
+         <button 
+            onClick={handleInvite}
+            className="flex items-center gap-2 bg-stadium-accent hover:bg-blue-600 text-white px-3 py-2 rounded-full shadow-lg transition-all text-sm font-medium pointer-events-auto"
+         >
+            <Share2 size={16} />
+            <span className="hidden sm:inline">{showInvite ? 'Copied!' : 'Invite'}</span>
+         </button>
       </div>
 
-      {/* LAYER 5: Chat & Notifications (Bottom Right) */}
-      <div className="absolute bottom-6 right-6 z-40 flex flex-col items-end gap-3 pointer-events-none">
-          
-          {/* Notification Toast */}
-          {notification && !isChatOpen && (
-              <div className="bg-stadium-900/90 backdrop-blur-md text-white p-3 rounded-xl border border-stadium-700 shadow-xl max-w-xs animate-slide-up pointer-events-auto flex items-start gap-3 mb-2">
-                  <div className="bg-stadium-accent w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0">
-                      {notification.sender[0]}
-                  </div>
-                  <div className="min-w-0">
-                      <p className="text-xs font-bold text-stadium-accent">{notification.sender}</p>
-                      <p className="text-sm truncate">{notification.text}</p>
-                  </div>
-              </div>
-          )}
+      {/* --- CORNER 3: BOTTOM LEFT (Channel Settings) --- */}
+      <div className="absolute bottom-6 left-6 z-50 pointer-events-auto">
+          <div className="relative">
+             {isStreamMenuOpen && (
+                 <div className="absolute bottom-full left-0 mb-3 w-80 bg-stadium-900/95 backdrop-blur-xl border border-stadium-700 rounded-xl p-4 shadow-2xl flex flex-col gap-3 origin-bottom-left animate-in fade-in zoom-in-95 duration-200">
+                     <div className="flex justify-between items-center pb-2 border-b border-white/10">
+                        <label className="text-xs text-gray-400 font-bold uppercase tracking-wider">Channels</label>
+                        <button onClick={() => setIsStreamMenuOpen(false)} className="text-gray-400 hover:text-white"><X size={14} /></button>
+                     </div>
+                     
+                     <div className="flex flex-col gap-2 max-h-48 overflow-y-auto no-scrollbar">
+                         {channels.map((channel) => (
+                             <div 
+                                key={channel.id} 
+                                className={`group flex items-center justify-between p-2 rounded-lg border transition-all cursor-pointer ${activeChannelId === channel.id ? 'bg-stadium-accent/20 border-stadium-accent text-white' : 'bg-black/40 border-transparent hover:bg-white/5 text-gray-300'}`}
+                                onClick={() => handleSwitchChannel(channel.id)}
+                             >
+                                 <div className="flex flex-col min-w-0">
+                                     <span className="text-xs font-bold truncate">{channel.name}</span>
+                                     <span className="text-[10px] text-gray-500 truncate max-w-[180px]">{channel.url}</span>
+                                 </div>
+                                 <div className="flex items-center gap-2">
+                                     {activeChannelId === channel.id && <div className="w-2 h-2 rounded-full bg-stadium-success animate-pulse"></div>}
+                                     {channels.length > 1 && (
+                                         <button 
+                                            onClick={(e) => handleDeleteChannel(e, channel.id)}
+                                            className="p-1 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            title="Remove Channel"
+                                         >
+                                             <Trash2 size={12} />
+                                         </button>
+                                     )}
+                                 </div>
+                             </div>
+                         ))}
+                     </div>
 
-          {/* Chat Floating Button */}
-          <button
-            onClick={() => {
-                setIsChatOpen(!isChatOpen);
-                setUnreadCount(0);
-            }}
-            className="w-14 h-14 bg-stadium-accent hover:bg-blue-600 rounded-full shadow-lg shadow-blue-900/50 flex items-center justify-center text-white transition-transform hover:scale-105 pointer-events-auto relative group"
-          >
-             {isChatOpen ? <X size={24} /> : <MessageSquare size={24} />}
-             
-             {/* Unread Badge */}
-             {!isChatOpen && unreadCount > 0 && (
-                 <div className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center text-[10px] font-bold border-2 border-black animate-bounce">
-                     {unreadCount}
+                     <div className="pt-2 border-t border-white/10 flex gap-2">
+                        <input 
+                            value={newChannelInput}
+                            onChange={(e) => setNewChannelInput(e.target.value)}
+                            className="flex-1 bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-stadium-accent"
+                            placeholder="Add stream URL..."
+                        />
+                        <button 
+                            onClick={handleAddChannel}
+                            disabled={!newChannelInput.trim()}
+                            className="bg-stadium-accent hover:bg-blue-600 disabled:opacity-50 text-white p-2 rounded-lg transition-colors"
+                        >
+                            <Plus size={16} />
+                        </button>
+                     </div>
                  </div>
              )}
              
-             {/* Tooltip */}
-             <div className="absolute right-full mr-3 bg-black/80 px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap backdrop-blur-sm">
-                 {isChatOpen ? 'Close Chat' : 'Party Chat & Stats'}
-             </div>
-          </button>
+             <button 
+               onClick={() => setIsStreamMenuOpen(!isStreamMenuOpen)}
+               className={`bg-black/50 hover:bg-black/70 backdrop-blur-md border border-white/10 text-white p-3 rounded-full shadow-xl transition-all ${isStreamMenuOpen ? 'ring-2 ring-stadium-accent' : ''}`}
+               title="Channels"
+             >
+                 <Tv size={20} />
+             </button>
+          </div>
       </div>
 
-      {/* LAYER 6: Popup Chat Window */}
+      {/* --- CORNER 4: BOTTOM RIGHT (Controls Dock) --- */}
+      <div className="absolute bottom-6 right-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
+          
+          <div className="flex flex-col items-end gap-2 w-full">
+            {notification && !isChatOpen && (
+                <div className="bg-stadium-900/90 backdrop-blur-md text-white p-3 rounded-xl border border-stadium-700 shadow-xl max-w-xs animate-slide-up pointer-events-auto flex items-start gap-3">
+                    <div className="bg-stadium-accent w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">
+                        {notification.sender[0]}
+                    </div>
+                    <div className="min-w-0">
+                        <p className="text-[10px] font-bold text-stadium-accent">{notification.sender}</p>
+                        <p className="text-xs truncate">{notification.text}</p>
+                    </div>
+                </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 pointer-events-auto bg-black/60 backdrop-blur-lg p-2 rounded-2xl border border-white/10 shadow-2xl">
+              
+              <button 
+                  onClick={toggleMute}
+                  className={`p-3 rounded-xl transition-all ${users[0].isMuted ? 'bg-red-500/90 text-white hover:bg-red-600' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                  title="Toggle Microphone"
+              >
+                  {users[0].isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+              </button>
+
+              <button 
+                  onClick={toggleVideo}
+                  className={`p-3 rounded-xl transition-all ${users[0].isVideoOff ? 'bg-red-500/90 text-white hover:bg-red-600' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                  title="Toggle Camera"
+              >
+                  {users[0].isVideoOff ? <VideoOff size={20} /> : <Video size={20} />}
+              </button>
+
+              <div className="w-px h-8 bg-white/20 mx-1"></div>
+
+              <button
+                onClick={() => {
+                    setIsChatOpen(!isChatOpen);
+                    setUnreadCount(0);
+                }}
+                className={`p-3 rounded-xl transition-all relative ${isChatOpen ? 'bg-stadium-accent text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                title="Toggle Chat"
+              >
+                 <MessageSquare size={20} />
+                 {!isChatOpen && unreadCount > 0 && (
+                     <div className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center text-[10px] font-bold border-2 border-black animate-bounce">
+                         {unreadCount}
+                     </div>
+                 )}
+              </button>
+
+               <button 
+                  onClick={() => {
+                      if (roomRef.current && roomRef.current.r) roomRef.current.r.leave();
+                      window.location.reload(); 
+                  }}
+                  className="p-3 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors ml-1"
+                  title="Leave Party"
+               >
+                  <PhoneOff size={20} />
+               </button>
+          </div>
+      </div>
+
       {isChatOpen && (
-          <div className="absolute bottom-24 right-6 w-80 sm:w-96 h-[65vh] max-h-[600px] bg-stadium-900/90 backdrop-blur-xl border border-stadium-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden z-30 origin-bottom-right animate-in fade-in zoom-in-95 duration-200">
+          <div className="absolute bottom-24 right-6 w-80 h-[60vh] max-h-[500px] bg-stadium-900/90 backdrop-blur-xl border border-stadium-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden z-40 origin-bottom-right animate-in fade-in zoom-in-95 duration-200 pointer-events-auto">
              <ChatSidebar 
                 messages={messages} 
                 onSendMessage={handleSendMessage}
