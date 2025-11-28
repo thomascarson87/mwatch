@@ -12,7 +12,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ streamConfig }) => {
     if (!url) return '';
 
     // Extract src from raw iframe string if provided
-    // Example: <iframe src="https://..." ...></iframe>
     if (url.trim().startsWith('<iframe') || url.trim().includes('<iframe')) {
         const srcMatch = url.match(/src\s*=\s*["']([^"']+)["']/i);
         if (srcMatch && srcMatch[1]) {
