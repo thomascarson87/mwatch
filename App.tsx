@@ -14,7 +14,7 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   
   // Default stream for initial load
-  const DEFAULT_STREAM = `<iframe id="player" marginheight="0" marginwidth="0" src="https://embednow.top/embed/ucl/2025-11-25/che-bar" scrolling="no" allowfullscreen="yes" allow="encrypted-media; picture-in-picture;" width="100%" height="100%" frameborder="0" style="position:absolute;"></iframe>`;
+  const DEFAULT_STREAM = `<iframe id="player" marginheight="0" marginwidth="0" src="https://embednow.top/embed/epl/2025-11-30/cry-mun" scrolling="no" allowfullscreen="yes" allow="encrypted-media; picture-in-picture;" width="100%" height="100%" frameborder="0" style="position:absolute;"></iframe>`;
   
   // Multi-Channel State
   const [channels, setChannels] = useState<Channel[]>([
